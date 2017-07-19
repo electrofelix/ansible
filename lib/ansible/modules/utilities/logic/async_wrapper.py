@@ -21,11 +21,15 @@ import traceback
 import signal
 import time
 import syslog
+import multiprocessing
 
 PY3 = sys.version_info[0] == 3
 
 syslog.openlog('ansible-%s' % os.path.basename(__file__))
 syslog.syslog(syslog.LOG_NOTICE, 'Invoked with %s' % " ".join(sys.argv[1:]))
+
+# pipe for communication between forked process and parent
+ipc_watcher, ipc_notifier = multiprocessing.Pipe()
 
 
 def notice(msg):
@@ -141,6 +145,13 @@ def _run_module(wrapped_cmd, jid, job_path):
         if interpreter:
             cmd = interpreter + cmd
         script = subprocess.Popen(cmd, shell=False, stdin=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        # allow enough time for the started process to finish reading it's
+        # files before signaling that it has been started
+        time.sleep(0.5)
+        ipc_notifier.send(True)
+        ipc_notifier.close()
+
         (outdata, stderr) = script.communicate()
         if PY3:
             outdata = outdata.decode('utf-8', 'surrogateescape')
@@ -163,6 +174,8 @@ def _run_module(wrapped_cmd, jid, job_path):
         jobfile.write(json.dumps(result))
 
     except (OSError, IOError):
+        ipc_notifier.send(False)
+        ipc_notifier.close()
         e = sys.exc_info()[1]
         result = {
             "failed": 1,
@@ -175,6 +188,8 @@ def _run_module(wrapped_cmd, jid, job_path):
         jobfile.write(json.dumps(result))
 
     except (ValueError, Exception):
+        ipc_notifier.send(False)
+        ipc_notifier.close()
         result = {
             "failed": 1,
             "cmd": wrapped_cmd,
@@ -240,14 +255,39 @@ if __name__ == '__main__':
             # to initialize PRIOR to ansible trying to clean up the launch directory (and argsfile)
             # this probably could be done with some IPC later.  Modules should always read
             # the argsfile at the very first start of their execution anyway
+
+            # close off notifier handle in grandparent, probably unnecessary as
+            # this process doesn't hang around long enough
+            ipc_notifier.close()
+
+            # allow waiting up to 5 seconds in total should be long enough for worst
+            # loaded environment in practice.
+            retries = 25
+            started = None
+            while retries > 0:
+                if ipc_watcher.poll(0.2):
+                    started = ipc_watcher.recv()
+                    break
+                else:
+                    retries = retries - 1
+                    continue
+
+            if started is not None:
+                debug("Return async_wrapper task started.")
+            else:
+                # may still have started
+                debug("Return async_wrapper task failed to start in time.")
+
             notice("Return async_wrapper task started.")
             print(json.dumps({"started": 1, "finished": 0, "ansible_job_id": jid, "results_file": job_path,
                               "_ansible_suppress_tmpdir_delete": not preserve_tmp}))
             sys.stdout.flush()
-            time.sleep(1)
             sys.exit(0)
         else:
             # The actual wrapper process
+
+            # close off the receiving end of the pipe from child process
+            ipc_watcher.close()
 
             # Daemonize, so we keep on running
             daemonize_self()
@@ -257,6 +297,10 @@ if __name__ == '__main__':
 
             sub_pid = os.fork()
             if sub_pid:
+                # close off inherited pipe handles
+                ipc_watcher.close()
+                ipc_notifier.close()
+
                 # the parent stops the process after the time limit
                 remaining = int(time_limit)
 
