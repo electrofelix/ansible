@@ -306,6 +306,7 @@ class Service(object):
             # Return a JSON blob to parent
             blob = json.dumps([p.returncode, to_text(stdout), to_text(stderr)])
             os.write(pipe[1], to_bytes(blob, errors='surrogate_or_strict'))
+            os.fsync(pipe[1])
             os.close(pipe[1])
             os._exit(0)
         elif pid == -1:
