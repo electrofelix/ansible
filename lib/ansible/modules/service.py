@@ -267,7 +267,7 @@ class Service(object):
             # chkconfig localizes messages and we're screen scraping so make
             # sure we use the C locale
             lang_env = dict(LANG='C', LC_ALL='C', LC_MESSAGES='C')
-            p = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=lang_env, preexec_fn=lambda: os.close(pipe[1]))
+            p = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=lang_env, close_fds=True)
             stdout = b("")
             stderr = b("")
             fds = [p.stdout, p.stderr]
