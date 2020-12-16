@@ -272,10 +272,9 @@ class Service(object):
             stderr = b("")
             fds = [p.stdout, p.stderr]
             # Wait for all output, or until the main process is dead and its output is done.
+            timeout = 1
             while fds:
-                rfd, wfd, efd = select.select(fds, [], fds, 1)
-                if not (rfd + wfd + efd) and p.poll() is not None:
-                    break
+                rfd, wfd, efd = select.select(fds, [], fds, timeout)
                 if p.stdout in rfd:
                     dat = os.read(p.stdout.fileno(), 4096)
                     if not dat:
@@ -286,7 +285,24 @@ class Service(object):
                     if not dat:
                         fds.remove(p.stderr)
                     stderr += dat
-            p.wait()
+                if p.poll() is not None:
+                    if not fds or timeout == 0:
+                        break
+
+                    # If we see EOF on stdout and stderr probably done. Call
+                    # select one more time with a zero timeout to be certain
+                    # not to miss anything that may have been written to
+                    # stdout/stderr between the time select() was called
+                    # and learned that process has finished
+                    timeout = 0
+
+                # if the process has not yet exited, but already read EOF
+                # from it's stdout/stderr (and thus removed both from fds)
+                # can just wait for it to exit.
+                elif not fds:
+                    p.wait()
+                    break
+
             # Return a JSON blob to parent
             blob = json.dumps([p.returncode, to_text(stdout), to_text(stderr)])
             os.write(pipe[1], to_bytes(blob, errors='surrogate_or_strict'))
